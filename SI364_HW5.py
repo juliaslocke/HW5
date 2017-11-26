@@ -9,7 +9,7 @@ from flask_wtf import FlaskForm
 from wtforms import StringField, SubmitField
 from wtforms.validators import Required
 from flask_sqlalchemy import SQLAlchemy
-
+from flask_mail import Mail, Message
 from flask_migrate import Migrate, MigrateCommand
 
 # Configure base directory of app
@@ -23,9 +23,18 @@ app.config['SECRET_KEY'] = 'hardtoguessstringfromsi364(thisisnotsupersecure)'
 
 ## TODO: Create database and change the SQLAlchemy Database URI.
 ## Your Postgres database should be your uniqname, plus HW5, e.g. "jczettaHW5" or "maupandeHW5"
-app.config["SQLALCHEMY_DATABASE_URI"] = "postgresql://localhost/hw5_364"
+app.config["SQLALCHEMY_DATABASE_URI"] = "postgresql://localhost/jullockeHW5"
 app.config['SQLALCHEMY_COMMIT_ON_TEARDOWN'] = True
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+app.config['MAIL_SERVER'] = 'smtp.googlemail.com'
+app.config['MAIL_PORT'] = 587 #default
+app.config['MAIL_USE_TLS'] = True
+app.config['MAIL_USERNAME'] = os.environ.get('MAIL_USERNAME')
+app.config['MAIL_PASSWORD'] = os.environ.get('MAIL_PASSWORD')
+app.config['MAIL_SUBJECT_PREFIX'] = '[HW5]'
+app.config['MAIL_SENDER'] = 'Admin <jullocke364@gmail.com>' # TODO fill in email
+app.config['ADMIN'] = os.environ.get('ADMIN')
 
 # TODO: Add configuration specifications so that email can be sent from this application, like the examples you saw in the textbook and in class. Make sure you've installed the correct library with pip! See textbook.
 # NOTE: Make sure that you DO NOT write your actual email password in text!!!!
@@ -36,6 +45,7 @@ manager = Manager(app)
 db = SQLAlchemy(app) # For database use
 migrate = Migrate(app, db) # For database use/updating
 manager.add_command('db', MigrateCommand) # Add migrate
+mail = Mail(app)
 # TODO: Run commands to create your migrations folder and get ready to create a first migration, as shown in the textbook and in class.
 
 ## Set up Shell context so it's easy to use the shell to debug
@@ -45,7 +55,11 @@ def make_shell_context():
 manager.add_command("shell", Shell(make_context=make_shell_context))
 
 # TODO: Write a send_email function here. (As shown in examples.)
-
+def send_email(to, subject, template, **kwargs):
+    msg = Message(app.config['MAIL_SUBJECT_PREFIX'] + subject, sender=app.config['MAIL_SENDER'], recipients=[to])
+    msg.body = render_template(template + '.txt', **kwargs)
+    msg.html = render_template(template + '.html', **kwargs)
+    mail.send(msg)
 #########
 ######### Everything above this line is important/useful setup, not problem-solving.
 #########
@@ -73,6 +87,7 @@ class User(db.Model):
     __tablename__ = "users"
     id = db.Column(db.Integer, primary_key=True) ## -- id (Primary Key)
     twitter_username = db.Column(db.String(64), unique=True)
+    user_email = db.Column(db.String(64))
     def __repr__(self):
         return "{} (ID: {})".format(self.twitter_username,self.id)
 
@@ -93,6 +108,7 @@ class Hashtag(db.Model):
 class TweetForm(FlaskForm):
     text = StringField("What is the text of your tweet? Please separate all hashtags with commas in this case. e.g. 'Yay Python #python, #programming, #awesome' ", validators=[Required()])
     username = StringField("What is your Twitter username?",validators=[Required()])
+    email = StringField("What is your email?", validators=[Required()])
     submit = SubmitField('Submit')
 
 
@@ -105,12 +121,12 @@ class TweetForm(FlaskForm):
 ## -- Hashtags should be identified by their text (e.g. if there's already a hashtag with that text, return it; otherwise, create it)
 
 # TODO: Edit get_or_create_user (AND get_or_create_tweet -- see below) as necessary to store a user's email as well as their twitter username. The get_or_create_user function should accept an email as input and deal with it appropriately to save it as part of a User row. Each user (from now on) has an email! This should be a small change to how the function currently works.
-def get_or_create_user(db_session, username):
+def get_or_create_user(db_session, username, email):
     user = db_session.query(User).filter_by(twitter_username=username).first()
     if user:
         return user
     else:
-        user = User(twitter_username=username)
+        user = User(twitter_username=username, user_email=email)
         db_session.add(user)
         db_session.commit()
         return user
@@ -126,12 +142,12 @@ def get_or_create_hashtag(db_session, hashtag_given):
         return hashtag
 
 # TODO: You will need to make changes in this function as well, to address users having emails. See above. What do you need to change to make sure get_or_create_user is *invoked* correctly, including saving an email? Does anything need to change about the input to get_or_create_tweet, and *its* invocations?
-def get_or_create_tweet(db_session, input_text, username):
-    tweet = db_session.query(Tweet).filter_by(text=input_text, user_id=get_or_create_user(db_session, username).id).first()
+def get_or_create_tweet(db_session, input_text, username, email):
+    tweet = db_session.query(Tweet).filter_by(text=input_text, user_id=get_or_create_user(db_session, username, email).id).first()
     if tweet:
         return tweet
     else:
-        user = get_or_create_user(db_session, username)
+        user = get_or_create_user(db_session, username, email)
         tweet = Tweet(text=input_text, user_id=user.id)
         for text in input_text.split(','):
             if "#" in text.strip():
@@ -164,9 +180,11 @@ def index():
     num_tweets = len(tweets)
     form = TweetForm()
     if form.validate_on_submit():
-        if db.session.query(Tweet).filter_by(text=form.text.data, user_id= (get_or_create_user(db.session, form.username.data).id)).first():
+        if db.session.query(Tweet).filter_by(text=form.text.data, user_id= (get_or_create_user(db.session, form.username.data, form.email.data).id)).first():
             flash("You've already saved that tweet by this user!")
-        get_or_create_tweet(db.session, form.text.data, form.username.data)
+        else:
+            get_or_create_tweet(db.session, form.text.data, form.username.data, form.email.data)
+            send_email(form.email.data, 'Tweet Saved', 'mail/new_tweet', tweet=form.text.data)
         return redirect(url_for('see_all_tweets'))
     return render_template('index.html', form=form,num_tweets=num_tweets)
 
